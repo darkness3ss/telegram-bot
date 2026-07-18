@@ -9,20 +9,13 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from aiogram.client.session.aiohttp import AiohttpSession
 
 # ================= НАСТРОЙКИ =================
 BOT_TOKEN = "8849587958:AAGD3YKBqTzKB3co00dVZqNot75nQblxYTM"  
 ADMIN_ID = 706754876
 
-#  ВАШ PROXY (MTProto)
-PROXY_URL = "http://127.0.0.1:1443"
-
 logging.basicConfig(level=logging.INFO)
-
-# Настройка прокси
-session = AiohttpSession(proxy=PROXY_URL)
-bot = Bot(token=BOT_TOKEN, session=session)
+bot = Bot(token=BOT_TOKEN)
 
 dp = Dispatcher()
 router = Router()
@@ -39,10 +32,10 @@ async def init_db():
                             (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, username TEXT, 
                              phone TEXT, service_id INTEGER, schedule_id INTEGER, created_at TEXT)''')
         
-        cursor = await db.execute("SELECT COUNT(*) FROM services")
-        if (await cursor.fetchone())[0] == 0:
-            services = [("Кератин/Ботокс",), ("Холодное восстановление",), ("Пилинг кожи головы",)]
-            await db.executemany("INSERT INTO services (name) VALUES (?)", services)
+        # Очищаем старые услуги и добавляем актуальные
+        await db.execute("DELETE FROM services")
+        services = [("Кератин/Ботокс",), ("Холодное восстановление",), ("Пилинг кожи головы",)]
+        await db.executemany("INSERT INTO services (name) VALUES (?)", services)
         await db.commit()
 
 # ================= СОСТОЯНИЯ (FSM) =================
@@ -56,20 +49,28 @@ class AdminSchedule(StatesGroup):
     adding_date = State()
     adding_times = State()
 
-# ================= КЛИЕНТСКАЯ ЧАСТЬ =================
-@router.message(Command("start"))
-async def cmd_start(message: Message, state: FSMContext):
-    await state.clear()
+# ================= ГЛАВНОЕ МЕНЮ =================
+def main_menu_kb():
     kb = InlineKeyboardBuilder()
     kb.button(text="📅 Записаться на процедуру", callback_data="book_start")
     kb.button(text="📋 Мои записи", callback_data="my_bookings")
-    kb.button(text=" Связь с мастером", callback_data="contacts")
+    kb.button(text="📞 Связь с мастером", callback_data="contacts")
     kb.adjust(1)
-    await message.answer(
-        f"Здравствуйте, {message.from_user.first_name}! ✨\n"
-        "Я бот мастера красоты. Помогу записаться на процедуры или посмотреть свои записи.",
-        reply_markup=kb.as_markup()
-    )
+    return kb.as_markup()
+
+async def show_main_menu(callback_or_message, state: FSMContext, first_name=""):
+    await state.clear()
+    text = f"Здравствуйте, {first_name}! ✨\nЯ бот мастера красоты. Помогу записаться на процедуры или посмотреть свои записи."
+    if isinstance(callback_or_message, CallbackQuery):
+        await callback_or_message.message.edit_text(text, reply_markup=main_menu_kb())
+        await callback_or_message.answer()
+    else:
+        await callback_or_message.answer(text, reply_markup=main_menu_kb())
+
+# ================= КЛИЕНТСКАЯ ЧАСТЬ =================
+@router.message(Command("start"))
+async def cmd_start(message: Message, state: FSMContext):
+    await show_main_menu(message, state, message.from_user.first_name)
 
 @router.callback_query(F.data == "book_start")
 async def process_book_start(callback: CallbackQuery, state: FSMContext):
@@ -90,6 +91,7 @@ async def process_book_start(callback: CallbackQuery, state: FSMContext):
     )
     await state.set_state(ClientBooking.choosing_service)
     await state.update_data(selected_services=[])
+    await callback.answer()
 
 @router.callback_query(F.data.startswith("service_"), StateFilter(ClientBooking.choosing_service))
 async def process_service(callback: CallbackQuery, state: FSMContext):
@@ -104,7 +106,6 @@ async def process_service(callback: CallbackQuery, state: FSMContext):
     
     await state.update_data(selected_services=selected)
     
-    # Обновляем клавиатуру с отметками
     async with aiosqlite.connect('beauty_bot.db') as db:
         cursor = await db.execute("SELECT id, name FROM services")
         services = await cursor.fetchall()
@@ -135,7 +136,6 @@ async def service_done(callback: CallbackQuery, state: FSMContext):
         await callback.answer("⚠️ Выберите хотя бы одну услугу!", show_alert=True)
         return
     
-    # Получаем свободные даты
     async with aiosqlite.connect('beauty_bot.db') as db:
         cursor = await db.execute("SELECT DISTINCT date FROM schedule WHERE is_booked = 0 AND date >= date('now') ORDER BY date")
         dates = await cursor.fetchall()
@@ -153,6 +153,7 @@ async def service_done(callback: CallbackQuery, state: FSMContext):
     kb.adjust(2)
     await callback.message.edit_text("Выберите удобную дату:", reply_markup=kb.as_markup())
     await state.set_state(ClientBooking.choosing_date)
+    await callback.answer()
 
 @router.callback_query(F.data.startswith("date_"), StateFilter(ClientBooking.choosing_date))
 async def process_date(callback: CallbackQuery, state: FSMContext):
@@ -166,10 +167,12 @@ async def process_date(callback: CallbackQuery, state: FSMContext):
     kb = InlineKeyboardBuilder()
     for t_id, t_time in times:
         kb.button(text=t_time, callback_data=f"time_{t_id}")
-    kb.button(text="⬅️ Назад к услугам", callback_data="book_start")
+    kb.button(text="️ Назад к услугам", callback_data="book_start")
+    kb.button(text="❌ Отмена", callback_data="cancel_to_menu")
     kb.adjust(3)
     await callback.message.edit_text(f"Выберите время на {date_str}:", reply_markup=kb.as_markup())
     await state.set_state(ClientBooking.choosing_time)
+    await callback.answer()
 
 @router.callback_query(F.data.startswith("time_"), StateFilter(ClientBooking.choosing_time))
 async def process_time(callback: CallbackQuery, state: FSMContext):
@@ -179,6 +182,7 @@ async def process_time(callback: CallbackQuery, state: FSMContext):
     kb = ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="📱 Отправить контакт", request_contact=True)]], resize_keyboard=True)
     await callback.message.edit_text("Отлично! Теперь поделитесь вашим номером телефона для связи, нажав на кнопку ниже.", reply_markup=kb)
     await state.set_state(ClientBooking.sending_phone)
+    await callback.answer()
 
 @router.message(F.contact, StateFilter(ClientBooking.sending_phone))
 async def process_phone(message: Message, state: FSMContext, bot: Bot):
@@ -187,7 +191,6 @@ async def process_phone(message: Message, state: FSMContext, bot: Bot):
     username = message.from_user.username or message.from_user.first_name
     
     async with aiosqlite.connect('beauty_bot.db') as db:
-        # Записываем все выбранные услуги
         for service_id in data['selected_services']:
             await db.execute("UPDATE schedule SET is_booked = 1 WHERE id = ?", (data['schedule_id'],))
             await db.execute(
@@ -195,14 +198,11 @@ async def process_phone(message: Message, state: FSMContext, bot: Bot):
                 (message.from_user.id, username, phone, service_id, data['schedule_id'], datetime.now().isoformat())
             )
         
-        # Получаем инфо для уведомления
-        cursor = await db.execute("SELECT name FROM services WHERE id = ?", (data['selected_services'][0],))
-        service_name = (await cursor.fetchone())[0]
         cursor = await db.execute("SELECT date, time FROM schedule WHERE id = ?", (data['schedule_id'],))
         date_str, time_str = await cursor.fetchone()
         await db.commit()
 
-    # Уведомление мастеру
+    # Собираем список услуг
     services_text = ""
     async with aiosqlite.connect('beauty_bot.db') as db:
         for service_id in data['selected_services']:
@@ -210,11 +210,12 @@ async def process_phone(message: Message, state: FSMContext, bot: Bot):
             name = (await cursor.fetchone())[0]
             services_text += f"• {name}\n"
 
+    # Уведомление мастеру
     await bot.send_message(ADMIN_ID, 
         f"🔔 <b>НОВАЯ ЗАПИСЬ!</b>\n\n"
         f"👤 Клиент: @{username} ({phone})\n"
         f"💇‍♀️ Услуги:\n{services_text}\n"
-        f" Дата: {date_str}\n"
+        f"📅 Дата: {date_str}\n"
         f"⏰ Время: {time_str}")
     
     # Подтверждение клиенту
@@ -266,33 +267,11 @@ async def contacts_handler(callback: CallbackQuery):
 
 @router.callback_query(F.data == "start_back")
 async def start_back_handler(callback: CallbackQuery, state: FSMContext):
-    await state.clear()
-    kb = InlineKeyboardBuilder()
-    kb.button(text="📅 Записаться на процедуру", callback_data="book_start")
-    kb.button(text="📋 Мои записи", callback_data="my_bookings")
-    kb.button(text="📞 Связь с мастером", callback_data="contacts")
-    kb.adjust(1)
-    await callback.message.edit_text(
-        f"Здравствуйте, {callback.from_user.first_name}! \n"
-        "Я бот мастера красоты. Помогу записаться на процедуры или посмотреть свои записи.",
-        reply_markup=kb.as_markup()
-    )
-    await callback.answer()
+    await show_main_menu(callback, state, callback.from_user.first_name)
 
 @router.callback_query(F.data == "cancel_to_menu")
 async def cancel_to_menu(callback: CallbackQuery, state: FSMContext):
-    await state.clear()
-    kb = InlineKeyboardBuilder()
-    kb.button(text="📅 Записаться на процедуру", callback_data="book_start")
-    kb.button(text="📋 Мои записи", callback_data="my_bookings")
-    kb.button(text="📞 Связь с мастером", callback_data="contacts")
-    kb.adjust(1)
-    await callback.message.edit_text(
-        f"Здравствуйте, {callback.from_user.first_name}! ✨\n"
-        "Я бот мастера красоты. Помогу записаться на процедуры или посмотреть свои записи.",
-        reply_markup=kb.as_markup()
-    )
-    await callback.answer()
+    await show_main_menu(callback, state, callback.from_user.first_name)
 
 # ================= АДМИН-ПАНЕЛЬ =================
 @router.message(Command("admin"))
@@ -301,14 +280,16 @@ async def cmd_admin(message: Message):
         return
     kb = InlineKeyboardBuilder()
     kb.button(text="➕ Добавить окошки", callback_data="admin_add_schedule")
-    kb.button(text="📊 Все записи на сегодня", callback_data="admin_today")
+    kb.button(text=" Все записи на сегодня", callback_data="admin_today")
+    kb.button(text="🗑 Удалить все записи", callback_data="admin_clear")
     kb.adjust(1)
-    await message.answer(" Админ-панель:", reply_markup=kb.as_markup())
+    await message.answer("🔐 Админ-панель:", reply_markup=kb.as_markup())
 
 @router.callback_query(F.data == "admin_add_schedule", F.from_user.id == ADMIN_ID)
 async def admin_add_schedule(callback: CallbackQuery, state: FSMContext):
     await callback.message.edit_text("Введите дату в формате ГГГГ-ММ-ДД (например, 2026-07-25):")
     await state.set_state(AdminSchedule.adding_date)
+    await callback.answer()
 
 @router.message(StateFilter(AdminSchedule.adding_date), F.from_user.id == ADMIN_ID)
 async def admin_process_date(message: Message, state: FSMContext):
@@ -354,8 +335,17 @@ async def admin_today_handler(callback: CallbackQuery):
             text += f"⏰ {time} | {name}\n👤 {username} ({phone})\n\n"
             
     kb = InlineKeyboardBuilder()
-    kb.button(text="⬅️ В главное меню", callback_data="start_back")
+    kb.button(text="️ В главное меню", callback_data="start_back")
     await callback.message.edit_text(text, reply_markup=kb.as_markup())
+    await callback.answer()
+
+@router.callback_query(F.data == "admin_clear", F.from_user.id == ADMIN_ID)
+async def admin_clear_handler(callback: CallbackQuery):
+    async with aiosqlite.connect('beauty_bot.db') as db:
+        await db.execute("DELETE FROM bookings")
+        await db.execute("UPDATE schedule SET is_booked = 0")
+        await db.commit()
+    await callback.message.edit_text("🗑 Все записи удалены, окошки снова свободны.")
     await callback.answer()
 
 # ================= НАПОМИНАНИЯ =================
@@ -378,7 +368,7 @@ async def check_reminders(bot: Bot):
     for user_id, service_name, date, time in upcoming:
         try:
             await bot.send_message(user_id, 
-                f" Напоминание!\n\n"
+                f"🔔 <b>Напоминание!</b>\n\n"
                 f"Завтра, {date} в {time}, я жду вас на процедуру:\n"
                 f"💇‍♀️ {service_name}\n\n"
                 f"Если у вас изменились планы, пожалуйста, предупредите меня заранее! 💖")
