@@ -13,7 +13,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 # ================= НАСТРОЙКИ =================
 BOT_TOKEN = "8849587958:AAGD3YKBqTzKB3co00dVZqNot75nQblxYTM"  
 ADMIN_ID = 706754876
-ADMIN_PASSWORD = "120126"  # Пароль для админки
+ADMIN_PASSWORD = "120126"
 
 logging.basicConfig(level=logging.INFO)
 bot = Bot(token=BOT_TOKEN)
@@ -63,12 +63,30 @@ def main_menu_kb():
 
 async def show_main_menu(callback_or_message, state: FSMContext, first_name=""):
     await state.clear()
-    text = f"Здравствуйте, {first_name}! ✨\nЯ бот мастера красоты. Помогу записаться на процедуры или посмотреть свои записи."
+    text = f"Здравствуйте, {first_name}! \nЯ бот мастера красоты. Помогу записаться на процедуры или посмотреть свои записи."
     if isinstance(callback_or_message, CallbackQuery):
         await callback_or_message.message.edit_text(text, reply_markup=main_menu_kb())
         await callback_or_message.answer()
     else:
         await callback_or_message.answer(text, reply_markup=main_menu_kb())
+
+# ================= АДМИН МЕНЮ =================
+def admin_menu_kb():
+    kb = InlineKeyboardBuilder()
+    kb.button(text="➕ Добавить окошки", callback_data="admin_add_schedule")
+    kb.button(text="📊 Все записи на сегодня", callback_data="admin_today")
+    kb.button(text=" Удалить все записи", callback_data="admin_clear")
+    kb.button(text=" Выйти из админки", callback_data="admin_logout")
+    kb.adjust(1)
+    return kb.as_markup()
+
+async def show_admin_menu(callback_or_message, state: FSMContext):
+    await state.clear()
+    if isinstance(callback_or_message, CallbackQuery):
+        await callback_or_message.message.edit_text("🔐 Админ-панель:", reply_markup=admin_menu_kb())
+        await callback_or_message.answer()
+    else:
+        await callback_or_message.answer("🔐 Админ-панель:", reply_markup=admin_menu_kb())
 
 # ================= КЛИЕНТСКАЯ ЧАСТЬ =================
 @router.message(CommandStart())
@@ -125,7 +143,7 @@ async def process_service(callback: CallbackQuery, state: FSMContext):
     if selected_names:
         text = f"Выбрано: {', '.join(selected_names)}\n\nМожете выбрать ещё или нажать 'Готово'"
     else:
-        text = "Выберите процедуру (можно выбрать несколько):\n\n💡 Нажмите на нужные услуги, затем 'Готово'"
+        text = "Выберите процедуру (можно выбрать несколько):\n\n Нажмите на нужные услуги, затем 'Готово'"
     
     await callback.message.edit_text(text, reply_markup=kb.as_markup())
     await callback.answer()
@@ -182,8 +200,13 @@ async def process_time(callback: CallbackQuery, state: FSMContext):
     schedule_id = int(callback.data.split("_")[1])
     await state.update_data(schedule_id=schedule_id)
     
-    kb = ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="📱 Отправить контакт", request_contact=True)]], resize_keyboard=True)
-    await callback.message.edit_text("Отлично! Теперь поделитесь вашим номером телефона для связи, нажав на кнопку ниже.", reply_markup=kb)
+    # Отправляем НОВОЕ сообщение с кнопкой контакта (не edit_text!)
+    kb = ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="📱 Отправить контакт", request_contact=True)]], resize_keyboard=True, one_time_keyboard=True)
+    await callback.message.delete()  # Удаляем старое сообщение
+    await callback.message.answer(
+        "Отлично! Теперь нажмите на кнопку ниже, чтобы поделиться номером телефона:",
+        reply_markup=kb
+    )
     await state.set_state(ClientBooking.sending_phone)
     await callback.answer()
 
@@ -220,13 +243,18 @@ async def process_phone(message: Message, state: FSMContext, bot: Bot):
         f"⏰ Время: {time_str}")
     
     await message.answer(
-        f"Вы успешно записаны! ✨\n"
+        f"✅ Вы успешно записаны! ✨\n"
         f"💇‍♀️ Услуги:\n{services_text}\n"
         f"📅 {date_str} в {time_str}\n\n"
         f"Жду вас! За 24 часа я пришлю вам напоминание. 💖",
         reply_markup=ReplyKeyboardRemove()
     )
     await state.clear()
+
+# Обработка текстовых сообщений (если пользователь не отправил контакт)
+@router.message(F.text, StateFilter(ClientBooking.sending_phone))
+async def handle_text_in_phone_state(message: Message):
+    await message.answer("⚠️ Пожалуйста, нажмите на кнопку '📱 Отправить контакт' ниже, чтобы поделиться номером телефона.")
 
 @router.callback_query(F.data == "my_bookings")
 async def my_bookings_handler(callback: CallbackQuery):
@@ -243,9 +271,9 @@ async def my_bookings_handler(callback: CallbackQuery):
     if not bookings:
         text = "У вас пока нет активных записей. 📅"
     else:
-        text = " <b>Ваши записи:</b>\n\n"
+        text = "📋 <b>Ваши записи:</b>\n\n"
         for name, date, time in bookings:
-            text += f"💇‍♀️ {name}\n📅 {date} в {time}\n\n"
+            text += f"💇♀️ {name}\n📅 {date} в {time}\n\n"
     
     kb = InlineKeyboardBuilder()
     kb.button(text="️ В главное меню", callback_data="start_back")
@@ -257,7 +285,7 @@ async def contacts_handler(callback: CallbackQuery):
     kb = InlineKeyboardBuilder()
     kb.button(text="⬅️ В главное меню", callback_data="start_back")
     await callback.message.edit_text(
-        " Связь с мастером:\n\n"
+        "📞 Связь с мастером:\n\n"
         "Telegram: @soresssa\n"
         "VK: https://vk.ru/savchenko_ss\n"
         "Анастасия",
@@ -277,22 +305,23 @@ async def cancel_to_menu(callback: CallbackQuery, state: FSMContext):
 @router.message(Command("admin"))
 async def cmd_admin(message: Message, state: FSMContext):
     if message.from_user.id != ADMIN_ID:
-        await message.answer("️ У вас нет доступа к админ-панели.")
+        await message.answer("⚠️ У вас нет доступа к админ-панели.")
         return
     
     await message.answer("🔐 Введите пароль для доступа к админ-панели:")
     await state.set_state(AdminAuth.waiting_password)
 
+@router.message(Command("logout"))
+async def cmd_logout(message: Message, state: FSMContext):
+    if message.from_user.id != ADMIN_ID:
+        return
+    await show_main_menu(message, state, message.from_user.first_name)
+    await message.answer(" Вы вышли из админ-панели. Теперь вы в обычном режиме.")
+
 @router.message(StateFilter(AdminAuth.waiting_password), F.from_user.id == ADMIN_ID)
 async def admin_auth_handler(message: Message, state: FSMContext):
     if message.text == ADMIN_PASSWORD:
-        await state.clear()
-        kb = InlineKeyboardBuilder()
-        kb.button(text="➕ Добавить окошки", callback_data="admin_add_schedule")
-        kb.button(text=" Все записи на сегодня", callback_data="admin_today")
-        kb.button(text="🗑 Удалить все записи", callback_data="admin_clear")
-        kb.adjust(1)
-        await message.answer("✅ Доступ разрешён! Админ-панель:", reply_markup=kb.as_markup())
+        await show_admin_menu(message, state)
     else:
         await message.answer("❌ Неверный пароль. Попробуйте ещё раз или нажмите /start.")
         await state.clear()
@@ -340,11 +369,11 @@ async def admin_today_handler(callback: CallbackQuery):
         bookings = await cursor.fetchall()
     
     if not bookings:
-        text = f" На сегодня ({today}) записей нет."
+        text = f"📊 На сегодня ({today}) записей нет."
     else:
         text = f"📊 <b>Записи на сегодня ({today}):</b>\n\n"
         for username, phone, name, time in bookings:
-            text += f"⏰ {time} | {name}\n {username} ({phone})\n\n"
+            text += f"⏰ {time} | {name}\n👤 {username} ({phone})\n\n"
             
     kb = InlineKeyboardBuilder()
     kb.button(text="⬅️ В главное меню", callback_data="start_back")
@@ -359,6 +388,11 @@ async def admin_clear_handler(callback: CallbackQuery):
         await db.commit()
     await callback.message.edit_text("🗑 Все записи удалены, окошки снова свободны.")
     await callback.answer()
+
+@router.callback_query(F.data == "admin_logout", F.from_user.id == ADMIN_ID)
+async def admin_logout_handler(callback: CallbackQuery, state: FSMContext):
+    await show_main_menu(callback, state, callback.from_user.first_name)
+    await callback.message.answer(" Вы вышли из админ-панели. Теперь вы в обычном режиме.")
 
 # ================= НАПОМИНАНИЯ =================
 async def check_reminders(bot: Bot):
@@ -380,7 +414,7 @@ async def check_reminders(bot: Bot):
     for user_id, service_name, date, time in upcoming:
         try:
             await bot.send_message(user_id, 
-                f"🔔 <b>Напоминание!</b>\n\n"
+                f" <b>Напоминание!</b>\n\n"
                 f"Завтра, {date} в {time}, я жду вас на процедуру:\n"
                 f"💇‍♀️ {service_name}\n\n"
                 f"Если у вас изменились планы, пожалуйста, предупредите меня заранее! 💖")
