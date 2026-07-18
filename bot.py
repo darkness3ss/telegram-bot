@@ -3,16 +3,17 @@ import logging
 import aiosqlite
 from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher, F, Router
-from aiogram.filters import Command, StateFilter
+from aiogram.filters import Command, CommandStart, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove
+from aiogram.types import Message, CallbackQuery, KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 # ================= НАСТРОЙКИ =================
 BOT_TOKEN = "8849587958:AAGD3YKBqTzKB3co00dVZqNot75nQblxYTM"  
 ADMIN_ID = 706754876
+ADMIN_PASSWORD = "120126"  # Пароль для админки
 
 logging.basicConfig(level=logging.INFO)
 bot = Bot(token=BOT_TOKEN)
@@ -32,7 +33,6 @@ async def init_db():
                             (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, username TEXT, 
                              phone TEXT, service_id INTEGER, schedule_id INTEGER, created_at TEXT)''')
         
-        # Очищаем старые услуги и добавляем актуальные
         await db.execute("DELETE FROM services")
         services = [("Кератин/Ботокс",), ("Холодное восстановление",), ("Пилинг кожи головы",)]
         await db.executemany("INSERT INTO services (name) VALUES (?)", services)
@@ -44,6 +44,9 @@ class ClientBooking(StatesGroup):
     choosing_date = State()
     choosing_time = State()
     sending_phone = State()
+
+class AdminAuth(StatesGroup):
+    waiting_password = State()
 
 class AdminSchedule(StatesGroup):
     adding_date = State()
@@ -68,7 +71,7 @@ async def show_main_menu(callback_or_message, state: FSMContext, first_name=""):
         await callback_or_message.answer(text, reply_markup=main_menu_kb())
 
 # ================= КЛИЕНТСКАЯ ЧАСТЬ =================
-@router.message(Command("start"))
+@router.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext):
     await show_main_menu(message, state, message.from_user.first_name)
 
@@ -93,7 +96,7 @@ async def process_book_start(callback: CallbackQuery, state: FSMContext):
     await state.update_data(selected_services=[])
     await callback.answer()
 
-@router.callback_query(F.data.startswith("service_"), StateFilter(ClientBooking.choosing_service))
+@router.callback_query(F.data.startswith("service_") & ~F.data.endswith("service_done"), StateFilter(ClientBooking.choosing_service))
 async def process_service(callback: CallbackQuery, state: FSMContext):
     service_id = int(callback.data.split("_")[1])
     data = await state.get_data()
@@ -167,7 +170,7 @@ async def process_date(callback: CallbackQuery, state: FSMContext):
     kb = InlineKeyboardBuilder()
     for t_id, t_time in times:
         kb.button(text=t_time, callback_data=f"time_{t_id}")
-    kb.button(text="️ Назад к услугам", callback_data="book_start")
+    kb.button(text="⬅️ Назад к услугам", callback_data="book_start")
     kb.button(text="❌ Отмена", callback_data="cancel_to_menu")
     kb.adjust(3)
     await callback.message.edit_text(f"Выберите время на {date_str}:", reply_markup=kb.as_markup())
@@ -202,7 +205,6 @@ async def process_phone(message: Message, state: FSMContext, bot: Bot):
         date_str, time_str = await cursor.fetchone()
         await db.commit()
 
-    # Собираем список услуг
     services_text = ""
     async with aiosqlite.connect('beauty_bot.db') as db:
         for service_id in data['selected_services']:
@@ -210,7 +212,6 @@ async def process_phone(message: Message, state: FSMContext, bot: Bot):
             name = (await cursor.fetchone())[0]
             services_text += f"• {name}\n"
 
-    # Уведомление мастеру
     await bot.send_message(ADMIN_ID, 
         f"🔔 <b>НОВАЯ ЗАПИСЬ!</b>\n\n"
         f"👤 Клиент: @{username} ({phone})\n"
@@ -218,7 +219,6 @@ async def process_phone(message: Message, state: FSMContext, bot: Bot):
         f"📅 Дата: {date_str}\n"
         f"⏰ Время: {time_str}")
     
-    # Подтверждение клиенту
     await message.answer(
         f"Вы успешно записаны! ✨\n"
         f"💇‍♀️ Услуги:\n{services_text}\n"
@@ -243,12 +243,12 @@ async def my_bookings_handler(callback: CallbackQuery):
     if not bookings:
         text = "У вас пока нет активных записей. 📅"
     else:
-        text = "📋 <b>Ваши записи:</b>\n\n"
+        text = " <b>Ваши записи:</b>\n\n"
         for name, date, time in bookings:
             text += f"💇‍♀️ {name}\n📅 {date} в {time}\n\n"
     
     kb = InlineKeyboardBuilder()
-    kb.button(text="⬅️ В главное меню", callback_data="start_back")
+    kb.button(text="️ В главное меню", callback_data="start_back")
     await callback.message.edit_text(text, reply_markup=kb.as_markup())
     await callback.answer()
 
@@ -257,7 +257,7 @@ async def contacts_handler(callback: CallbackQuery):
     kb = InlineKeyboardBuilder()
     kb.button(text="⬅️ В главное меню", callback_data="start_back")
     await callback.message.edit_text(
-        "📞 Связь с мастером:\n\n"
+        " Связь с мастером:\n\n"
         "Telegram: @soresssa\n"
         "VK: https://vk.ru/savchenko_ss\n"
         "Анастасия",
@@ -273,17 +273,29 @@ async def start_back_handler(callback: CallbackQuery, state: FSMContext):
 async def cancel_to_menu(callback: CallbackQuery, state: FSMContext):
     await show_main_menu(callback, state, callback.from_user.first_name)
 
-# ================= АДМИН-ПАНЕЛЬ =================
+# ================= АДМИН-ПАНЕЛЬ С ПАРОЛЕМ =================
 @router.message(Command("admin"))
-async def cmd_admin(message: Message):
+async def cmd_admin(message: Message, state: FSMContext):
     if message.from_user.id != ADMIN_ID:
+        await message.answer("️ У вас нет доступа к админ-панели.")
         return
-    kb = InlineKeyboardBuilder()
-    kb.button(text="➕ Добавить окошки", callback_data="admin_add_schedule")
-    kb.button(text=" Все записи на сегодня", callback_data="admin_today")
-    kb.button(text="🗑 Удалить все записи", callback_data="admin_clear")
-    kb.adjust(1)
-    await message.answer("🔐 Админ-панель:", reply_markup=kb.as_markup())
+    
+    await message.answer("🔐 Введите пароль для доступа к админ-панели:")
+    await state.set_state(AdminAuth.waiting_password)
+
+@router.message(StateFilter(AdminAuth.waiting_password), F.from_user.id == ADMIN_ID)
+async def admin_auth_handler(message: Message, state: FSMContext):
+    if message.text == ADMIN_PASSWORD:
+        await state.clear()
+        kb = InlineKeyboardBuilder()
+        kb.button(text="➕ Добавить окошки", callback_data="admin_add_schedule")
+        kb.button(text=" Все записи на сегодня", callback_data="admin_today")
+        kb.button(text="🗑 Удалить все записи", callback_data="admin_clear")
+        kb.adjust(1)
+        await message.answer("✅ Доступ разрешён! Админ-панель:", reply_markup=kb.as_markup())
+    else:
+        await message.answer("❌ Неверный пароль. Попробуйте ещё раз или нажмите /start.")
+        await state.clear()
 
 @router.callback_query(F.data == "admin_add_schedule", F.from_user.id == ADMIN_ID)
 async def admin_add_schedule(callback: CallbackQuery, state: FSMContext):
@@ -328,14 +340,14 @@ async def admin_today_handler(callback: CallbackQuery):
         bookings = await cursor.fetchall()
     
     if not bookings:
-        text = f"📊 На сегодня ({today}) записей нет."
+        text = f" На сегодня ({today}) записей нет."
     else:
         text = f"📊 <b>Записи на сегодня ({today}):</b>\n\n"
         for username, phone, name, time in bookings:
-            text += f"⏰ {time} | {name}\n👤 {username} ({phone})\n\n"
+            text += f"⏰ {time} | {name}\n {username} ({phone})\n\n"
             
     kb = InlineKeyboardBuilder()
-    kb.button(text="️ В главное меню", callback_data="start_back")
+    kb.button(text="⬅️ В главное меню", callback_data="start_back")
     await callback.message.edit_text(text, reply_markup=kb.as_markup())
     await callback.answer()
 
